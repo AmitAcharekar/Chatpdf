@@ -1,27 +1,23 @@
-import os
 import streamlit as st
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import os
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import google.generativeai as genai
-from langchain.vectorstores import FAISS
+from langchain.vectorstores import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
+from dotenv import load_dotenv
+import google.generativeai as genai
 
-# For local development, use .env
-if "GOOGLE_API_KEY" not in st.secrets:
-    from dotenv import load_dotenv
-    load_dotenv()
-    api_key = os.getenv("GOOGLE_API_KEY")
-else:
-    # Use st.secrets when deploying on Streamlit Cloud
-    api_key = st.secrets["GOOGLE_API_KEY"]
+# Load environment variables for Google API key
+api_key = st.secrets["GOOGLE_API_KEY"]
 
 # Configure Google Generative AI with the API key
 genai.configure(api_key=api_key)
 
-# Function to extract text from uploaded PDF files
+# Function to extract text from the uploaded PDFs
 def get_pdf_text(pdf_docs):
     text = ""
     for pdf in pdf_docs:
@@ -30,24 +26,23 @@ def get_pdf_text(pdf_docs):
             text += page.extract_text()
     return text
 
-# Function to split the extracted text into chunks
+# Function to split the text into chunks
 def get_text_chunks(text):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
     chunks = text_splitter.split_text(text)
     return chunks
 
-# Function to generate vector store using the text chunks
+# Function to generate vector store using Chroma and store embeddings
 def get_vector_store(text_chunks):
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("faiss_index")
+    vector_store = Chroma.from_texts(text_chunks, embedding=embeddings)
+    vector_store.persist()  # Save the Chroma store locally
 
-# Function to set up a conversational chain with a custom prompt
+# Function to load the conversational chain using Google Generative AI
 def get_conversational_chain():
     prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details.
-    If the answer is not in provided context just say, "answer is not available in the context."
-    Don't provide the wrong answer.\n\n
+    Answer the question as detailed as possible from the provided context, make sure to provide all the details, 
+    if the answer is not in provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
     Context:\n {context}?\n
     Question: \n{question}\n
     Answer:
@@ -58,34 +53,31 @@ def get_conversational_chain():
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
     return chain
 
-# Function to handle user input and generate a response
+# Function to handle user input and perform a similarity search over the Chroma vector store
 def user_input(user_question):
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    vector_store = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)  # Load persisted vector store
     
-    # Allow dangerous deserialization explicitly (safe if we trust our source)
-    new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-    
-    docs = new_db.similarity_search(user_question)
+    docs = vector_store.similarity_search(user_question)
     chain = get_conversational_chain()
     
     response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
     
-    # Display the response
     st.write("Reply: ", response["output_text"])
 
-# Main app function
+# Main function for the Streamlit app
 def main():
-    st.set_page_config("Chat PDF")
+    st.set_page_config(page_title="Chat PDF")
     st.header("Chat with PDF using Gemini💁")
-    
-    # User input to ask a question
+
+    # User input for the question to ask the PDF
     user_question = st.text_input("Ask a Question from the PDF Files")
-    
-    # If the user inputs a question, process it
+
+    # Process the question and return the response
     if user_question:
         user_input(user_question)
 
-    # Sidebar for uploading and processing PDF files
+    # Sidebar for uploading PDF files
     with st.sidebar:
         st.title("Menu:")
         pdf_docs = st.file_uploader("Upload your PDF Files and Click on the Submit & Process Button", accept_multiple_files=True)
@@ -93,9 +85,8 @@ def main():
             with st.spinner("Processing..."):
                 raw_text = get_pdf_text(pdf_docs)
                 text_chunks = get_text_chunks(raw_text)
-                get_vector_store(text_chunks)
+                get_vector_store(text_chunks)  # Create the vector store from the chunks
                 st.success("Done")
 
-# Entry point of the app
 if __name__ == "__main__":
     main()
